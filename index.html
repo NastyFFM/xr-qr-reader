@@ -139,7 +139,18 @@
         readFB   = gl.createFramebuffer();
 
         scanning = true; cameraSeen = false; framesSinceStart = 0;
-        hintEl.textContent = "Kamera wird initialisiert …";
+
+        // Definitive Diagnose: hat der Browser camera-access wirklich gewährt?
+        const feats = xrSession.enabledFeatures || [];
+        const hasCam = feats.includes("camera-access");
+        if (hasCam) {
+          hintEl.textContent = "Kamera wird initialisiert …";
+        } else {
+          hintEl.innerHTML =
+            "⚠️ Dieser Quest-Browser hat <b>camera-access</b> NICHT gewährt.<br>" +
+            "Aktive Features: " + (feats.join(", ") || "—") + "<br>" +
+            "→ Raw Camera Access ist hier nicht verfügbar (Browser-Version/Flag).";
+        }
         showCard(false);
         startBtn.style.display = "none";
         exitBtn.style.display  = "block";
