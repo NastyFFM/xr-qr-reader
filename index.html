@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="de">
+<html lang="en">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
@@ -13,7 +13,7 @@
   }
   #wrap { max-width: 900px; margin: 0 auto; padding: 18px; }
   h1 { font-size: 20px; margin: 0 0 6px; }
-  p  { margin: 0 0 14px; color: #9fb0c0; line-height: 1.5; }
+  .hint { margin: 0 0 14px; color: #9fb0c0; line-height: 1.5; font-size: 16px; }
 
   button {
     font-size: 18px; padding: 14px 18px; border-radius: 12px; border: none;
@@ -24,7 +24,11 @@
 
   #status { font-size: 14px; color: #7d8da0; margin: 10px 0; min-height: 1.2em; }
 
-  /* Kamera-Vorschau mit Scan-Rahmen */
+  /* one-sentence instruction above the camera */
+  #camInfo { display: none; margin: 4px 0 8px; color: #cfe0f0; font-size: 16px; }
+  #camInfo.on { display: block; }
+
+  /* camera preview with scan frame */
   #stage { position: relative; width: 100%; border-radius: 16px; overflow: hidden;
            background: #000; aspect-ratio: 4 / 3; display: none; }
   #stage.on { display: block; }
@@ -35,32 +39,32 @@
     pointer-events: none;
   }
 
-  /* Treffer-Karte */
-  #card {
-    display: none; margin-top: 16px;
+  /* result card */
+  #card { display: none; margin-top: 16px;
     background: rgba(13,19,28,.96); border: 1px solid #2a3a4d;
-    border-radius: 16px; padding: 18px;
-  }
+    border-radius: 16px; padding: 18px; }
   #card.show { display: block; }
-  #qLabel { font-size: 18px; font-weight: 700; margin-bottom: 8px; }
-  #qUrl {
-    font-size: 16px; word-break: break-all; color: #7fc4ff;
+  #msg { font-size: 16px; margin-bottom: 8px; }
+  #qUrl { font-size: 16px; word-break: break-all; color: #7fc4ff;
     background: #0a121c; border: 1px solid #21303f; border-radius: 10px;
-    padding: 10px 12px; margin-bottom: 16px;
-  }
+    padding: 10px 12px; margin-bottom: 16px; }
   #row { display: flex; gap: 12px; }
   #row button { flex: 1; }
 </style>
 </head>
 <body>
   <div id="wrap">
-    <h1>QR-Code Reader</h1>
-    <p>Nutzt die Passthrough-Kamera der Quest. Starte die Kamera, halte einen
-       QR-Code in den Rahmen – danach erscheint die URL mit „Link öffnen".</p>
+    <h1>QR Code Reader</h1>
 
-    <button id="startBtn">Kamera starten</button>
-    <button id="stopBtn" class="secondary" style="display:none">Kamera stoppen</button>
-    <div id="status">Bereit.</div>
+    <!-- one-sentence instruction on the start page -->
+    <p id="startInfo" class="hint">Start the camera and point your headset at a QR code &mdash; its link opens automatically in a new tab.</p>
+
+    <button id="startBtn">Start camera</button>
+    <button id="stopBtn" class="secondary" style="display:none">Stop camera</button>
+    <div id="status">Ready.</div>
+
+    <!-- one-sentence instruction above the camera image -->
+    <p id="camInfo">Hold a QR code inside the frame &mdash; the link opens automatically.</p>
 
     <div id="stage">
       <video id="video" playsinline muted></video>
@@ -68,11 +72,11 @@
     </div>
 
     <div id="card">
-      <div id="qLabel">QR-Code erkannt</div>
+      <div id="msg"></div>
       <div id="qUrl"></div>
       <div id="row">
-        <button id="openBtn">Link öffnen</button>
-        <button id="rescanBtn" class="secondary">Weiter scannen</button>
+        <button id="openBtn" style="display:none">Open link</button>
+        <button id="rescanBtn" class="secondary">Scan next</button>
       </div>
     </div>
   </div>
@@ -85,29 +89,29 @@
     const startBtn = document.getElementById("startBtn");
     const stopBtn  = document.getElementById("stopBtn");
     const statusEl = document.getElementById("status");
+    const startInfo= document.getElementById("startInfo");
+    const camInfo  = document.getElementById("camInfo");
     const stage    = document.getElementById("stage");
     const video    = document.getElementById("video");
     const card     = document.getElementById("card");
+    const msgEl    = document.getElementById("msg");
     const qUrlEl   = document.getElementById("qUrl");
-    const qLabel   = document.getElementById("qLabel");
     const openBtn  = document.getElementById("openBtn");
     const rescanBtn= document.getElementById("rescanBtn");
 
     let stream = null, scanning = false, rafId = 0, currentUrl = "";
-    let detector = null;                 // native BarcodeDetector, falls vorhanden
+    let detector = null;
     const canvas = document.createElement("canvas");
     const ctx = canvas.getContext("2d", { willReadFrequently: true });
-
     const setStatus = (m) => { statusEl.textContent = m; };
 
-    // Native BarcodeDetector bevorzugen (schneller), sonst jsQR
+    // prefer native BarcodeDetector, fall back to jsQR
     (async () => {
       try {
         if ("BarcodeDetector" in window) {
           const fmts = await window.BarcodeDetector.getSupportedFormats();
-          if (fmts.includes("qr_code")) {
+          if (fmts.includes("qr_code"))
             detector = new window.BarcodeDetector({ formats: ["qr_code"] });
-          }
         }
       } catch (_) { detector = null; }
     })();
@@ -115,43 +119,46 @@
     startBtn.addEventListener("click", startCamera);
     stopBtn.addEventListener("click", stopCamera);
     rescanBtn.addEventListener("click", () => { card.classList.remove("show"); resumeScan(); });
+    openBtn.addEventListener("click", () => openUrl(currentUrl)); // gesture-based fallback
 
-    openBtn.addEventListener("click", () => {
-      if (!/^https?:\/\//i.test(currentUrl)) return;
-      const win = window.open(currentUrl, "_blank", "noopener");  // im Klick = User-Geste
-      if (!win) window.location.href = currentUrl;                // Fallback
-    });
+    function openUrl(url) {
+      if (!/^https?:\/\//i.test(url)) return false;
+      const win = window.open(url, "_blank", "noopener");
+      return !!win;
+    }
 
     async function startCamera() {
-      setStatus("Kamera wird gestartet …");
+      setStatus("Starting camera …");
       try {
-        // facingMode 'environment' = vordere Passthrough-Kamera der Quest
         stream = await navigator.mediaDevices.getUserMedia({
           video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 960 } }
         });
         video.srcObject = stream;
         await video.play();
         stage.classList.add("on");
+        camInfo.classList.add("on");
+        startInfo.style.display = "none";
         startBtn.style.display = "none";
         stopBtn.style.display  = "block";
-        setStatus(`Kamera bereit: ${video.videoWidth}×${video.videoHeight} – QR in den Rahmen halten.`);
+        setStatus(`Camera ready: ${video.videoWidth}×${video.videoHeight}`);
         resumeScan();
       } catch (err) {
-        setStatus("Kamera-Fehler: " + (err && err.message ? err.message : err) +
-                  "  (Kamera-Berechtigung erlaubt?)");
+        setStatus("Camera error: " + (err && err.message ? err.message : err) +
+                  "  (camera permission allowed?)");
       }
     }
 
     function stopCamera() {
       cancelScan();
       if (stream) stream.getTracks().forEach(t => t.stop());
-      stream = null;
-      video.srcObject = null;
+      stream = null; video.srcObject = null;
       stage.classList.remove("on");
+      camInfo.classList.remove("on");
       card.classList.remove("show");
+      startInfo.style.display = "block";
       startBtn.style.display = "block";
       stopBtn.style.display  = "none";
-      setStatus("Kamera gestoppt.");
+      setStatus("Camera stopped.");
     }
 
     function resumeScan() {
@@ -161,34 +168,31 @@
     }
     function cancelScan() {
       scanning = false;
-      if (rafId) cancelAnimationFrame(rafId), rafId = 0;
+      if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
     }
 
     async function scanLoop() {
       if (!scanning) return;
       if (video.readyState >= 2 && video.videoWidth) {
         const text = await scanFrame();
-        if (text) { onFound(text); return; }   // Schleife pausiert bei Treffer
+        if (text) { onFound(text); return; }   // pause on hit
       }
       rafId = requestAnimationFrame(scanLoop);
     }
 
     async function scanFrame() {
       const w = video.videoWidth, h = video.videoHeight;
-      // auf max ~640px verkleinern (Performance)
       const scale = Math.min(1, 640 / Math.max(w, h));
       const cw = Math.round(w * scale), ch = Math.round(h * scale);
       canvas.width = cw; canvas.height = ch;
       ctx.drawImage(video, 0, 0, cw, ch);
 
-      // 1) Nativer Detektor (falls vorhanden)
       if (detector) {
         try {
           const codes = await detector.detect(canvas);
           if (codes && codes.length) return codes[0].rawValue;
-        } catch (_) { /* fällt unten auf jsQR zurück */ }
+        } catch (_) {}
       }
-      // 2) jsQR
       if (typeof jsQR !== "undefined") {
         const img = ctx.getImageData(0, 0, cw, ch);
         const code = jsQR(img.data, cw, ch, { inversionAttempts: "attemptBoth" });
@@ -198,20 +202,29 @@
     }
 
     function onFound(text) {
-      cancelScan();
+      cancelScan();                       // stop scanning so we don't spam tabs
       currentUrl = (text || "").trim();
       qUrlEl.textContent = currentUrl;
       const isHttp = /^https?:\/\//i.test(currentUrl);
-      qLabel.textContent = isHttp ? "QR-Code erkannt – Link öffnen?" : "QR-Code erkannt (kein Web-Link)";
-      openBtn.disabled = !isHttp;
-      openBtn.textContent = isHttp ? "Link öffnen" : "Kein Web-Link";
+
+      if (isHttp) {
+        const opened = openUrl(currentUrl);   // open immediately in a new tab
+        if (opened) {
+          msgEl.textContent = "Opened in a new tab.";
+          openBtn.style.display = "none";
+        } else {
+          msgEl.textContent = "Popup blocked — tap to open:";
+          openBtn.style.display = "block";    // gesture fallback
+        }
+      } else {
+        msgEl.textContent = "QR content (not a web link):";
+        openBtn.style.display = "none";
+      }
       card.classList.add("show");
-      setStatus("Treffer.");
     }
 
-    // Feature-Check beim Laden
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      setStatus("getUserMedia nicht verfügbar – HTTPS nötig.");
+      setStatus("getUserMedia not available — HTTPS required.");
       startBtn.disabled = true;
     }
   })();
