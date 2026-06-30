@@ -3,71 +3,70 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-<title>XR QR Reader</title>
+<title>QR Reader (Quest Passthrough)</title>
 <style>
   :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
   html, body {
-    margin: 0; height: 100%; background: #0b0f14; color: #e6edf3;
+    margin: 0; min-height: 100%; background: #0b0f14; color: #e6edf3;
     font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
   }
-  #app {
-    max-width: 520px; margin: 0 auto; padding: 24px;
-    display: flex; flex-direction: column; gap: 16px;
-  }
-  h1 { font-size: 20px; margin: 0; }
-  p { margin: 0; line-height: 1.5; color: #9fb0c0; }
+  #wrap { max-width: 900px; margin: 0 auto; padding: 18px; }
+  h1 { font-size: 20px; margin: 0 0 6px; }
+  p  { margin: 0 0 14px; color: #9fb0c0; line-height: 1.5; }
+
   button {
     font-size: 18px; padding: 14px 18px; border-radius: 12px; border: none;
     background: #2563eb; color: #fff; cursor: pointer; font-weight: 600;
   }
   button.secondary { background: #243140; color: #e6edf3; }
-  button:disabled { opacity: .5; cursor: not-allowed; }
-  #status { font-size: 14px; color: #7d8da0; min-height: 1.2em; }
+  button:disabled  { opacity: .5; cursor: not-allowed; }
 
-  /* ---- XR DOM-Overlay ---- */
-  #overlay {
-    position: fixed; inset: 0; pointer-events: none;
-    display: flex; align-items: flex-end; justify-content: center;
-    padding: 6vh 4vw;
+  #status { font-size: 14px; color: #7d8da0; margin: 10px 0; min-height: 1.2em; }
+
+  /* Kamera-Vorschau mit Scan-Rahmen */
+  #stage { position: relative; width: 100%; border-radius: 16px; overflow: hidden;
+           background: #000; aspect-ratio: 4 / 3; display: none; }
+  #stage.on { display: block; }
+  #video { width: 100%; height: 100%; object-fit: cover; display: block; }
+  #frame {
+    position: absolute; inset: 12% 18%; border: 3px solid rgba(127,196,255,.9);
+    border-radius: 14px; box-shadow: 0 0 0 9999px rgba(0,0,0,.25);
+    pointer-events: none;
   }
+
+  /* Treffer-Karte */
   #card {
-    pointer-events: auto;
-    display: none;
-    width: min(640px, 92vw);
-    background: rgba(13, 19, 28, .92);
-    border: 1px solid #2a3a4d; border-radius: 18px;
-    padding: 22px 22px 18px; box-shadow: 0 12px 40px rgba(0,0,0,.5);
-    backdrop-filter: blur(6px);
+    display: none; margin-top: 16px;
+    background: rgba(13,19,28,.96); border: 1px solid #2a3a4d;
+    border-radius: 16px; padding: 18px;
   }
   #card.show { display: block; }
-  #qLabel { font-size: 22px; font-weight: 700; margin-bottom: 6px; }
+  #qLabel { font-size: 18px; font-weight: 700; margin-bottom: 8px; }
   #qUrl {
     font-size: 16px; word-break: break-all; color: #7fc4ff;
     background: #0a121c; border: 1px solid #21303f; border-radius: 10px;
-    padding: 10px 12px; margin: 10px 0 18px;
+    padding: 10px 12px; margin-bottom: 16px;
   }
   #row { display: flex; gap: 12px; }
   #row button { flex: 1; }
-  #hint {
-    pointer-events: none; position: fixed; top: 4vh; left: 0; right: 0;
-    text-align: center; font-size: 16px; color: #cfe0f0;
-    text-shadow: 0 1px 3px rgba(0,0,0,.8);
-  }
 </style>
 </head>
 <body>
-  <div id="app">
-    <h1>XR QR-Code Reader</h1>
-    <p>Starte den XR-Modus und schaue auf einen QR-Code. Sobald ein Code erkannt
-       wird, erscheint die URL mit der Frage, ob der Link geöffnet werden soll.</p>
-    <button id="startBtn">XR starten</button>
-    <button id="exitBtn" class="secondary" style="display:none">XR beenden</button>
-    <div id="status"></div>
-  </div>
+  <div id="wrap">
+    <h1>QR-Code Reader</h1>
+    <p>Nutzt die Passthrough-Kamera der Quest. Starte die Kamera, halte einen
+       QR-Code in den Rahmen – danach erscheint die URL mit „Link öffnen".</p>
 
-  <!-- Wird nur in der XR-Session als DOM-Overlay angezeigt -->
-  <div id="overlay">
-    <div id="hint">Auf einen QR-Code schauen …</div>
+    <button id="startBtn">Kamera starten</button>
+    <button id="stopBtn" class="secondary" style="display:none">Kamera stoppen</button>
+    <div id="status">Bereit.</div>
+
+    <div id="stage">
+      <video id="video" playsinline muted></video>
+      <div id="frame"></div>
+    </div>
+
     <div id="card">
       <div id="qLabel">QR-Code erkannt</div>
       <div id="qUrl"></div>
@@ -83,197 +82,138 @@
   (function () {
     "use strict";
 
-    const SCAN_EVERY = 4;          // nur jeden n-ten Frame scannen (Performance)
-    const MAX_DIM    = 640;        // Bild vor dem Dekodieren auf diese Kantenlänge verkleinern
-
     const startBtn = document.getElementById("startBtn");
-    const exitBtn  = document.getElementById("exitBtn");
+    const stopBtn  = document.getElementById("stopBtn");
     const statusEl = document.getElementById("status");
-    const overlay  = document.getElementById("overlay");
-    const hintEl   = document.getElementById("hint");
+    const stage    = document.getElementById("stage");
+    const video    = document.getElementById("video");
     const card     = document.getElementById("card");
     const qUrlEl   = document.getElementById("qUrl");
+    const qLabel   = document.getElementById("qLabel");
     const openBtn  = document.getElementById("openBtn");
     const rescanBtn= document.getElementById("rescanBtn");
 
-    let xrSession = null, gl = null, binding = null, refSpace = null;
-    let readFB = null, frameCount = 0, scanning = true, currentUrl = "";
-    let cameraSeen = false, framesSinceStart = 0;
+    let stream = null, scanning = false, rafId = 0, currentUrl = "";
+    let detector = null;                 // native BarcodeDetector, falls vorhanden
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
 
-    function setStatus(msg) { statusEl.textContent = msg; }
+    const setStatus = (m) => { statusEl.textContent = m; };
 
-    // ---------- Feature-Check ----------
-    if (!("xr" in navigator)) {
-      setStatus("WebXR ist in diesem Browser nicht verfügbar.");
-      startBtn.disabled = true;
-    } else {
-      navigator.xr.isSessionSupported("immersive-ar").then(ok => {
-        if (!ok) { setStatus("immersive-ar wird nicht unterstützt."); startBtn.disabled = true; }
-        else setStatus("Bereit.");
-      });
-    }
-    if (typeof jsQR === "undefined") {
-      setStatus("jsQR konnte nicht geladen werden (Internetverbindung?).");
-    }
-
-    // ---------- Session starten ----------
-    startBtn.addEventListener("click", async () => {
+    // Native BarcodeDetector bevorzugen (schneller), sonst jsQR
+    (async () => {
       try {
-        const canvas = document.createElement("canvas");
-        gl = canvas.getContext("webgl2", { xrCompatible: true });
-        if (!gl) { setStatus("WebGL2 nicht verfügbar."); return; }
-
-        // camera-access bewusst als OPTIONAL anfragen: ist der Browser-Flag
-        // nicht aktiv, würde "required" die ganze Session ablehnen.
-        xrSession = await navigator.xr.requestSession("immersive-ar", {
-          optionalFeatures: ["camera-access", "dom-overlay"],
-          domOverlay: { root: overlay }
-        });
-
-        xrSession.addEventListener("end", onSessionEnd);
-
-        await gl.makeXRCompatible();
-        xrSession.updateRenderState({ baseLayer: new XRWebGLLayer(xrSession, gl) });
-        binding  = new XRWebGLBinding(xrSession, gl);
-        refSpace = await xrSession.requestReferenceSpace("local");
-        readFB   = gl.createFramebuffer();
-
-        scanning = true; cameraSeen = false; framesSinceStart = 0;
-
-        // Definitive Diagnose: hat der Browser camera-access wirklich gewährt?
-        const feats = xrSession.enabledFeatures || [];
-        const hasCam = feats.includes("camera-access");
-        if (hasCam) {
-          hintEl.textContent = "Kamera wird initialisiert …";
-        } else {
-          hintEl.innerHTML =
-            "⚠️ Dieser Quest-Browser hat <b>camera-access</b> NICHT gewährt.<br>" +
-            "Aktive Features: " + (feats.join(", ") || "—") + "<br>" +
-            "→ Raw Camera Access ist hier nicht verfügbar (Browser-Version/Flag).";
+        if ("BarcodeDetector" in window) {
+          const fmts = await window.BarcodeDetector.getSupportedFormats();
+          if (fmts.includes("qr_code")) {
+            detector = new window.BarcodeDetector({ formats: ["qr_code"] });
+          }
         }
-        showCard(false);
-        startBtn.style.display = "none";
-        exitBtn.style.display  = "block";
-        setStatus("XR läuft.");
-        xrSession.requestAnimationFrame(onXRFrame);
-      } catch (e) {
-        setStatus("Start fehlgeschlagen: " + (e && e.message ? e.message : e));
-      }
-    });
+      } catch (_) { detector = null; }
+    })();
 
-    exitBtn.addEventListener("click", () => { if (xrSession) xrSession.end(); });
-
-    function onSessionEnd() {
-      xrSession = null; binding = null;
-      startBtn.style.display = "block";
-      exitBtn.style.display  = "none";
-      showCard(false);
-      setStatus("XR beendet.");
-    }
-
-    // ---------- Render-/Scan-Schleife ----------
-    function onXRFrame(t, frame) {
-      const session = frame.session;
-      if (!session) return;
-      session.requestAnimationFrame(onXRFrame);
-
-      const glLayer = session.renderState.baseLayer;
-      gl.bindFramebuffer(gl.FRAMEBUFFER, glLayer.framebuffer);
-      gl.clearColor(0, 0, 0, 0);          // transparent -> Passthrough scheint durch
-      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-
-      const pose = frame.getViewerPose(refSpace);
-
-      // Prüfen, ob der Kamerazugriff überhaupt verfügbar ist
-      framesSinceStart++;
-      if (!cameraSeen && pose) {
-        if (pose.views.some(v => v.camera)) {
-          cameraSeen = true;
-          hintEl.textContent = "Auf einen QR-Code schauen …";
-        } else if (framesSinceStart === 60) {
-          hintEl.innerHTML = "⚠️ Kein Kamerazugriff.<br>Bitte den WebXR-Kamera-Flag aktivieren (siehe Startseite) und neu laden.";
-        }
-      }
-
-      if (pose && scanning && cameraSeen && (frameCount++ % SCAN_EVERY === 0)) {
-        for (const view of pose.views) {
-          if (tryDecode(view)) break;     // erstes Auge reicht
-        }
-      }
-    }
-
-    function tryDecode(view) {
-      const cam = view.camera;
-      if (!cam || !binding) return false;
-
-      const tex = binding.getCameraImage(cam);
-      if (!tex) return false;
-
-      const w = cam.width, h = cam.height;
-      gl.bindFramebuffer(gl.FRAMEBUFFER, readFB);
-      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
-      if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) return false;
-
-      const buf = new Uint8Array(w * h * 4);
-      gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, buf);
-
-      // readPixels liefert das Bild von unten nach oben (gespiegelt) -> vertikal flippen
-      const { data, dw, dh } = flipAndDownscale(buf, w, h, MAX_DIM);
-
-      const code = jsQR(new Uint8ClampedArray(data.buffer), dw, dh, { inversionAttempts: "attemptBoth" });
-      if (code && code.data) { onQrFound(code.data); return true; }
-      return false;
-    }
-
-    // Vertikal spiegeln + (optional) verkleinern in einem Schritt (nearest neighbour)
-    function flipAndDownscale(src, w, h, maxDim) {
-      const scale = Math.min(1, maxDim / Math.max(w, h));
-      const dw = Math.max(1, Math.round(w * scale));
-      const dh = Math.max(1, Math.round(h * scale));
-      const out = new Uint8Array(dw * dh * 4);
-      for (let y = 0; y < dh; y++) {
-        const sy = h - 1 - Math.min(h - 1, Math.round(y / scale)); // flip vertikal
-        for (let x = 0; x < dw; x++) {
-          const sx = Math.min(w - 1, Math.round(x / scale));
-          const si = (sy * w + sx) * 4;
-          const di = (y * dw + x) * 4;
-          out[di]   = src[si];
-          out[di+1] = src[si+1];
-          out[di+2] = src[si+2];
-          out[di+3] = 255;
-        }
-      }
-      return { data: out, dw, dh };
-    }
-
-    // ---------- QR-Treffer ----------
-    function onQrFound(text) {
-      scanning = false;
-      currentUrl = text.trim();
-      qUrlEl.textContent = currentUrl;
-      const isHttp = /^https?:\/\//i.test(currentUrl);
-      openBtn.disabled = !isHttp;
-      openBtn.textContent = isHttp ? "Link öffnen" : "Kein Web-Link";
-      showCard(true);
-    }
-
-    function showCard(show) {
-      card.classList.toggle("show", show);
-      hintEl.style.display = show ? "none" : "block";
-    }
-
-    rescanBtn.addEventListener("click", () => { showCard(false); scanning = true; });
+    startBtn.addEventListener("click", startCamera);
+    stopBtn.addEventListener("click", stopCamera);
+    rescanBtn.addEventListener("click", () => { card.classList.remove("show"); resumeScan(); });
 
     openBtn.addEventListener("click", () => {
       if (!/^https?:\/\//i.test(currentUrl)) return;
-      // Synchron im Klick (User-Geste) öffnen, sonst blockiert der Browser das Fenster.
-      const win = window.open(currentUrl, "_blank", "noopener");
-      if (xrSession) xrSession.end();          // XR verlassen, Browser zeigt die Seite
-      if (!win) window.location.href = currentUrl; // Fallback
+      const win = window.open(currentUrl, "_blank", "noopener");  // im Klick = User-Geste
+      if (!win) window.location.href = currentUrl;                // Fallback
     });
 
-    // dom-overlay: verhindert, dass ein Klick auf den Button gleichzeitig ein XR-"select" auslöst
-    overlay.addEventListener("beforexrselect", (e) => e.preventDefault());
+    async function startCamera() {
+      setStatus("Kamera wird gestartet …");
+      try {
+        // facingMode 'environment' = vordere Passthrough-Kamera der Quest
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 960 } }
+        });
+        video.srcObject = stream;
+        await video.play();
+        stage.classList.add("on");
+        startBtn.style.display = "none";
+        stopBtn.style.display  = "block";
+        setStatus(`Kamera bereit: ${video.videoWidth}×${video.videoHeight} – QR in den Rahmen halten.`);
+        resumeScan();
+      } catch (err) {
+        setStatus("Kamera-Fehler: " + (err && err.message ? err.message : err) +
+                  "  (Kamera-Berechtigung erlaubt?)");
+      }
+    }
+
+    function stopCamera() {
+      cancelScan();
+      if (stream) stream.getTracks().forEach(t => t.stop());
+      stream = null;
+      video.srcObject = null;
+      stage.classList.remove("on");
+      card.classList.remove("show");
+      startBtn.style.display = "block";
+      stopBtn.style.display  = "none";
+      setStatus("Kamera gestoppt.");
+    }
+
+    function resumeScan() {
+      if (scanning) return;
+      scanning = true;
+      rafId = requestAnimationFrame(scanLoop);
+    }
+    function cancelScan() {
+      scanning = false;
+      if (rafId) cancelAnimationFrame(rafId), rafId = 0;
+    }
+
+    async function scanLoop() {
+      if (!scanning) return;
+      if (video.readyState >= 2 && video.videoWidth) {
+        const text = await scanFrame();
+        if (text) { onFound(text); return; }   // Schleife pausiert bei Treffer
+      }
+      rafId = requestAnimationFrame(scanLoop);
+    }
+
+    async function scanFrame() {
+      const w = video.videoWidth, h = video.videoHeight;
+      // auf max ~640px verkleinern (Performance)
+      const scale = Math.min(1, 640 / Math.max(w, h));
+      const cw = Math.round(w * scale), ch = Math.round(h * scale);
+      canvas.width = cw; canvas.height = ch;
+      ctx.drawImage(video, 0, 0, cw, ch);
+
+      // 1) Nativer Detektor (falls vorhanden)
+      if (detector) {
+        try {
+          const codes = await detector.detect(canvas);
+          if (codes && codes.length) return codes[0].rawValue;
+        } catch (_) { /* fällt unten auf jsQR zurück */ }
+      }
+      // 2) jsQR
+      if (typeof jsQR !== "undefined") {
+        const img = ctx.getImageData(0, 0, cw, ch);
+        const code = jsQR(img.data, cw, ch, { inversionAttempts: "attemptBoth" });
+        if (code && code.data) return code.data;
+      }
+      return null;
+    }
+
+    function onFound(text) {
+      cancelScan();
+      currentUrl = (text || "").trim();
+      qUrlEl.textContent = currentUrl;
+      const isHttp = /^https?:\/\//i.test(currentUrl);
+      qLabel.textContent = isHttp ? "QR-Code erkannt – Link öffnen?" : "QR-Code erkannt (kein Web-Link)";
+      openBtn.disabled = !isHttp;
+      openBtn.textContent = isHttp ? "Link öffnen" : "Kein Web-Link";
+      card.classList.add("show");
+      setStatus("Treffer.");
+    }
+
+    // Feature-Check beim Laden
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setStatus("getUserMedia nicht verfügbar – HTTPS nötig.");
+      startBtn.disabled = true;
+    }
   })();
   </script>
 </body>
