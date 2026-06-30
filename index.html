@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>XR QR Reader</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body {
+    margin: 0; height: 100%; background: #0b0f14; color: #e6edf3;
+    font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  }
+  #app {
+    max-width: 520px; margin: 0 auto; padding: 24px;
+    display: flex; flex-direction: column; gap: 16px;
+  }
+  h1 { font-size: 20px; margin: 0; }
+  p { margin: 0; line-height: 1.5; color: #9fb0c0; }
+  button {
+    font-size: 18px; padding: 14px 18px; border-radius: 12px; border: none;
+    background: #2563eb; color: #fff; cursor: pointer; font-weight: 600;
+  }
+  button.secondary { background: #243140; color: #e6edf3; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  #status { font-size: 14px; color: #7d8da0; min-height: 1.2em; }
+
+  /* ---- XR DOM-Overlay ---- */
+  #overlay {
+    position: fixed; inset: 0; pointer-events: none;
+    display: flex; align-items: flex-end; justify-content: center;
+    padding: 6vh 4vw;
+  }
+  #card {
+    pointer-events: auto;
+    display: none;
+    width: min(640px, 92vw);
+    background: rgba(13, 19, 28, .92);
+    border: 1px solid #2a3a4d; border-radius: 18px;
+    padding: 22px 22px 18px; box-shadow: 0 12px 40px rgba(0,0,0,.5);
+    backdrop-filter: blur(6px);
+  }
+  #card.show { display: block; }
+  #qLabel { font-size: 22px; font-weight: 700; margin-bottom: 6px; }
+  #qUrl {
+    font-size: 16px; word-break: break-all; color: #7fc4ff;
+    background: #0a121c; border: 1px solid #21303f; border-radius: 10px;
+    padding: 10px 12px; margin: 10px 0 18px;
+  }
+  #row { display: flex; gap: 12px; }
+  #row button { flex: 1; }
+  #hint {
+    pointer-events: none; position: fixed; top: 4vh; left: 0; right: 0;
+    text-align: center; font-size: 16px; color: #cfe0f0;
+    text-shadow: 0 1px 3px rgba(0,0,0,.8);
+  }
+</style>
+</head>
+<body>
+  <div id="app">
+    <h1>XR QR-Code Reader</h1>
+    <p>Starte den XR-Modus und schaue auf einen QR-Code. Sobald ein Code erkannt
+       wird, erscheint die URL mit der Frage, ob der Link geöffnet werden soll.</p>
+    <button id="startBtn">XR starten</button>
+    <button id="exitBtn" class="secondary" style="display:none">XR beenden</button>
+    <div id="status"></div>
+  </div>
+
+  <!-- Wird nur in der XR-Session als DOM-Overlay angezeigt -->
+  <div id="overlay">
+    <div id="hint">Auf einen QR-Code schauen …</div>
+    <div id="card">
+      <div id="qLabel">QR-Code erkannt</div>
+      <div id="qUrl"></div>
+      <div id="row">
+        <button id="openBtn">Link öffnen</button>
+        <button id="rescanBtn" class="secondary">Weiter scannen</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+  <script>
+  (function () {
+    "use strict";
+
+    const SCAN_EVERY = 4;          // nur jeden n-ten Frame scannen (Performance)
+    const MAX_DIM    = 640;        // Bild vor dem Dekodieren auf diese Kantenlänge verkleinern
+
+    const startBtn = document.getElementById("startBtn");
+    const exitBtn  = document.getElementById("exitBtn");
+    const statusEl = document.getElementById("status");
+    const overlay  = document.getElementById("overlay");
+    const hintEl   = document.getElementById("hint");
+    const card     = document.getElementById("card");
+    const qUrlEl   = document.getElementById("qUrl");
+    const openBtn  = document.getElementById("openBtn");
+    const rescanBtn= document.getElementById("rescanBtn");
+
+    let xrSession = null, gl = null, binding = null, refSpace = null;
+    let readFB = null, frameCount = 0, scanning = true, currentUrl = "";
+
+    function setStatus(msg) { statusEl.textContent = msg; }
+
+    // ---------- Feature-Check ----------
+    if (!("xr" in navigator)) {
+      setStatus("WebXR ist in diesem Browser nicht verfügbar.");
+      startBtn.disabled = true;
+    } else {
+      navigator.xr.isSessionSupported("immersive-ar").then(ok => {
+        if (!ok) { setStatus("immersive-ar wird nicht unterstützt."); startBtn.disabled = true; }
+        else setStatus("Bereit.");
+      });
+    }
+    if (typeof jsQR === "undefined") {
+      setStatus("jsQR konnte nicht geladen werden (Internetverbindung?).");
+    }
+
+    // ---------- Session starten ----------
+    startBtn.addEventListener("click", async () => {
+      try {
+        const canvas = document.createElement("canvas");
+        gl = canvas.getContext("webgl2", { xrCompatible: true });
+        if (!gl) { setStatus("WebGL2 nicht verfügbar."); return; }
+
+        xrSession = await navigator.xr.requestSession("immersive-ar", {
+          requiredFeatures: ["camera-access"],
+          optionalFeatures: ["dom-overlay"],
+          domOverlay: { root: overlay }
+        });
+
+        xrSession.addEventListener("end", onSessionEnd);
+
+        await gl.makeXRCompatible();
+        xrSession.updateRenderState({ baseLayer: new XRWebGLLayer(xrSession, gl) });
+        binding  = new XRWebGLBinding(xrSession, gl);
+        refSpace = await xrSession.requestReferenceSpace("local");
+        readFB   = gl.createFramebuffer();
+
+        scanning = true;
+        showCard(false);
+        startBtn.style.display = "none";
+        exitBtn.style.display  = "block";
+        setStatus("XR läuft.");
+        xrSession.requestAnimationFrame(onXRFrame);
+      } catch (e) {
+        setStatus("Start fehlgeschlagen: " + (e && e.message ? e.message : e));
+      }
+    });
+
+    exitBtn.addEventListener("click", () => { if (xrSession) xrSession.end(); });
+
+    function onSessionEnd() {
+      xrSession = null; binding = null;
+      startBtn.style.display = "block";
+      exitBtn.style.display  = "none";
+      showCard(false);
+      setStatus("XR beendet.");
+    }
+
+    // ---------- Render-/Scan-Schleife ----------
+    function onXRFrame(t, frame) {
+      const session = frame.session;
+      if (!session) return;
+      session.requestAnimationFrame(onXRFrame);
+
+      const glLayer = session.renderState.baseLayer;
+      gl.bindFramebuffer(gl.FRAMEBUFFER, glLayer.framebuffer);
+      gl.clearColor(0, 0, 0, 0);          // transparent -> Passthrough scheint durch
+      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+      const pose = frame.getViewerPose(refSpace);
+      if (pose && scanning && (frameCount++ % SCAN_EVERY === 0)) {
+        for (const view of pose.views) {
+          if (tryDecode(view)) break;     // erstes Auge reicht
+        }
+      }
+    }
+
+    function tryDecode(view) {
+      const cam = view.camera;
+      if (!cam || !binding) return false;
+
+      const tex = binding.getCameraImage(cam);
+      if (!tex) return false;
+
+      const w = cam.width, h = cam.height;
+      gl.bindFramebuffer(gl.FRAMEBUFFER, readFB);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+      if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) return false;
+
+      const buf = new Uint8Array(w * h * 4);
+      gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+
+      // readPixels liefert das Bild von unten nach oben (gespiegelt) -> vertikal flippen
+      const { data, dw, dh } = flipAndDownscale(buf, w, h, MAX_DIM);
+
+      const code = jsQR(new Uint8ClampedArray(data.buffer), dw, dh, { inversionAttempts: "attemptBoth" });
+      if (code && code.data) { onQrFound(code.data); return true; }
+      return false;
+    }
+
+    // Vertikal spiegeln + (optional) verkleinern in einem Schritt (nearest neighbour)
+    function flipAndDownscale(src, w, h, maxDim) {
+      const scale = Math.min(1, maxDim / Math.max(w, h));
+      const dw = Math.max(1, Math.round(w * scale));
+      const dh = Math.max(1, Math.round(h * scale));
+      const out = new Uint8Array(dw * dh * 4);
+      for (let y = 0; y < dh; y++) {
+        const sy = h - 1 - Math.min(h - 1, Math.round(y / scale)); // flip vertikal
+        for (let x = 0; x < dw; x++) {
+          const sx = Math.min(w - 1, Math.round(x / scale));
+          const si = (sy * w + sx) * 4;
+          const di = (y * dw + x) * 4;
+          out[di]   = src[si];
+          out[di+1] = src[si+1];
+          out[di+2] = src[si+2];
+          out[di+3] = 255;
+        }
+      }
+      return { data: out, dw, dh };
+    }
+
+    // ---------- QR-Treffer ----------
+    function onQrFound(text) {
+      scanning = false;
+      currentUrl = text.trim();
+      qUrlEl.textContent = currentUrl;
+      const isHttp = /^https?:\/\//i.test(currentUrl);
+      openBtn.disabled = !isHttp;
+      openBtn.textContent = isHttp ? "Link öffnen" : "Kein Web-Link";
+      showCard(true);
+    }
+
+    function showCard(show) {
+      card.classList.toggle("show", show);
+      hintEl.style.display = show ? "none" : "block";
+    }
+
+    rescanBtn.addEventListener("click", () => { showCard(false); scanning = true; });
+
+    openBtn.addEventListener("click", () => {
+      if (!/^https?:\/\//i.test(currentUrl)) return;
+      // Synchron im Klick (User-Geste) öffnen, sonst blockiert der Browser das Fenster.
+      const win = window.open(currentUrl, "_blank", "noopener");
+      if (xrSession) xrSession.end();          // XR verlassen, Browser zeigt die Seite
+      if (!win) window.location.href = currentUrl; // Fallback
+    });
+
+    // dom-overlay: verhindert, dass ein Klick auf den Button gleichzeitig ein XR-"select" auslöst
+    overlay.addEventListener("beforexrselect", (e) => e.preventDefault());
+  })();
+  </script>
+</body>
+</html>
