@@ -98,6 +98,7 @@
 
     let xrSession = null, gl = null, binding = null, refSpace = null;
     let readFB = null, frameCount = 0, scanning = true, currentUrl = "";
+    let cameraSeen = false, framesSinceStart = 0;
 
     function setStatus(msg) { statusEl.textContent = msg; }
 
@@ -122,9 +123,10 @@
         gl = canvas.getContext("webgl2", { xrCompatible: true });
         if (!gl) { setStatus("WebGL2 nicht verfügbar."); return; }
 
+        // camera-access bewusst als OPTIONAL anfragen: ist der Browser-Flag
+        // nicht aktiv, würde "required" die ganze Session ablehnen.
         xrSession = await navigator.xr.requestSession("immersive-ar", {
-          requiredFeatures: ["camera-access"],
-          optionalFeatures: ["dom-overlay"],
+          optionalFeatures: ["camera-access", "dom-overlay"],
           domOverlay: { root: overlay }
         });
 
@@ -136,7 +138,8 @@
         refSpace = await xrSession.requestReferenceSpace("local");
         readFB   = gl.createFramebuffer();
 
-        scanning = true;
+        scanning = true; cameraSeen = false; framesSinceStart = 0;
+        hintEl.textContent = "Kamera wird initialisiert …";
         showCard(false);
         startBtn.style.display = "none";
         exitBtn.style.display  = "block";
@@ -169,7 +172,19 @@
       gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
       const pose = frame.getViewerPose(refSpace);
-      if (pose && scanning && (frameCount++ % SCAN_EVERY === 0)) {
+
+      // Prüfen, ob der Kamerazugriff überhaupt verfügbar ist
+      framesSinceStart++;
+      if (!cameraSeen && pose) {
+        if (pose.views.some(v => v.camera)) {
+          cameraSeen = true;
+          hintEl.textContent = "Auf einen QR-Code schauen …";
+        } else if (framesSinceStart === 60) {
+          hintEl.innerHTML = "⚠️ Kein Kamerazugriff.<br>Bitte den WebXR-Kamera-Flag aktivieren (siehe Startseite) und neu laden.";
+        }
+      }
+
+      if (pose && scanning && cameraSeen && (frameCount++ % SCAN_EVERY === 0)) {
         for (const view of pose.views) {
           if (tryDecode(view)) break;     // erstes Auge reicht
         }
